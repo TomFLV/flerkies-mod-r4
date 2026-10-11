@@ -1,0 +1,9 @@
+#!/bin/sh
+# Flerkies Mod first-boot setup. BRANDING ONLY - no credentials are baked in.
+# Stock OpenWrt credential behaviour: root has NO password until you set one
+# (via LuCI > System > Administration, or `passwd` on the console).
+uci -q batch <<EOF
+set system.@system[0].hostname='flerkies-r4'
+commit system
+EOF
+exit 0

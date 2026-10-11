@@ -1,0 +1,13 @@
+{
+	"admin/system/ocpanel": {
+		"title": "Overclocking",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "ocpanel/panel"
+		},
+		"depends": {
+			"acl": [ "luci-app-ocpanel" ]
+		}
+	}
+}

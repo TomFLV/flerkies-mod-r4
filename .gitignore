@@ -1,0 +1,17 @@
+# never commit build trees, images, or anything with secrets
+openwrt/
+build_dir/
+staging_dir/
+bin/
+*.itb
+*.img
+*.img.gz
+*.bin
+*.ko
+tmp/
+# local-only secrets (never public)
+*secret*
+*.key
+*CREDENTIALS*
+files/etc/shadow
+files/etc/uci-defaults/*-local

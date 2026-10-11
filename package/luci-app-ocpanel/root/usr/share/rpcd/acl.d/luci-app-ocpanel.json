@@ -1,0 +1,15 @@
+{
+	"luci-app-ocpanel": {
+		"description": "Grant access to the Overclocking panel",
+		"read": {
+			"ubus": {
+				"ocpanel": [ "status", "bench_status", "bench_history", "results" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"ocpanel": [ "setfreq", "setvolt", "stock", "throttle", "bench_start", "setgov", "coremark" ]
+			}
+		}
+	}
+}

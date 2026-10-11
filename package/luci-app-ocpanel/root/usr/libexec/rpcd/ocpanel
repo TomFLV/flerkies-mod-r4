@@ -1,0 +1,117 @@
+#!/bin/sh
+# rpcd backend for luci-app-ocpanel. Controls CPU via the ocpanel_cpu kernel
+# module sysfs (freq_mhz / voltage_mv); human units throughout. Async benchmark.
+find_ocp() {
+	for d in /sys/devices/platform/ocpanel-cpu /sys/devices/platform/*ocpanel-cpu* /sys/devices/platform/*/ocpanel-cpu; do
+		[ -f "$d/freq_mhz" ] && { echo "$d"; return; }
+	done
+}
+OCP="$(find_ocp)"
+RES=/opt/bench/results
+CUR="$RES/current.json"
+
+case "$1" in
+	list)
+		echo '{"status":{},"setfreq":{"mhz":0},"setvolt":{"mv":0},"stock":{},"throttle":{"on":0},"bench_start":{"secs":0},"bench_status":{},"bench_history":{},"results":{}}'
+		;;
+	call)
+		input="$(cat)"
+		case "$2" in
+			status)
+				if [ -n "$OCP" ]; then
+					F=$(cat "$OCP/freq_mhz" 2>/dev/null)
+					V=$(cat "$OCP/voltage_mv" 2>/dev/null)
+					MOD=1
+				else
+					F=$(( $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null) / 1000 ))
+					V=$(( $(cat /sys/class/regulator/regulator.5/microvolts 2>/dev/null) / 1000 ))
+					MOD=0
+				fi
+				T=$(( $(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null) / 1000 ))
+				L=$(cut -d' ' -f1 /proc/loadavg)
+				G=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+				OV=$(df /overlay 2>/dev/null | sed -n '2p' | awk '{print $1}')
+				# per-core raw busy/total counters (panel computes % from deltas)
+				CORES=$(awk '/^cpu[0-9]+ / {idle=$5+$6; tot=0; for(i=2;i<=NF;i++)tot+=$i; printf "%s{\"busy\":%d,\"total\":%d}", (c++?",":""), tot-idle, tot}' /proc/stat)
+				NVT=0; for h in /sys/class/hwmon/hwmon*; do [ "$(cat $h/name 2>/dev/null)" = "nvme" ] && { NVT=$(( $(cat $h/temp1_input 2>/dev/null)/1000 )); break; }; done
+				THR=0; pgrep -f throttled.sh >/dev/null 2>&1 && THR=1
+				printf '{"module":%s,"freq_mhz":%s,"voltage_mv":%s,"temp_c":%s,"nvme_c":%s,"throttle":%s,"load":"%s","gov":"%s","overlay":"%s","cores":[%s]}' \
+					"$MOD" "${F:-0}" "${V:-0}" "${T:-0}" "$NVT" "$THR" "$L" "$G" "${OV:-?}" "$CORES"
+				;;
+			setfreq)
+				MHZ=$(echo "$input" | jsonfilter -e '@.mhz' 2>/dev/null)
+				SV=0
+				if [ -n "$OCP" ] && [ -n "$MHZ" ]; then
+					if   [ "$MHZ" -le 2100 ]; then SV=900
+					elif [ "$MHZ" -le 2200 ]; then SV=1000
+					elif [ "$MHZ" -le 2300 ]; then SV=1050
+					else SV=1100; fi
+					CUR=$(cat "$OCP/freq_mhz" 2>/dev/null)
+					if [ "$MHZ" -gt "${CUR:-0}" ]; then
+						echo "$SV"  > "$OCP/voltage_mv" 2>/tmp/ocp.err
+						echo "$MHZ" > "$OCP/freq_mhz"   2>>/tmp/ocp.err
+					else
+						echo "$MHZ" > "$OCP/freq_mhz"   2>/tmp/ocp.err
+						echo "$SV"  > "$OCP/voltage_mv" 2>>/tmp/ocp.err
+					fi
+				fi
+				[ -n "$MHZ" ] && echo "$MHZ" > /opt/bench/target_mhz 2>/dev/null
+				printf '{"ok":%s,"mhz":%s,"vset":%s,"err":"%s"}' "$([ -n "$OCP" ] && echo true || echo false)" "${MHZ:-0}" "$SV" "$(cat /tmp/ocp.err 2>/dev/null)"
+				;;
+			setvolt)
+				MV=$(echo "$input" | jsonfilter -e '@.mv' 2>/dev/null)
+				[ -n "$OCP" ] && [ -n "$MV" ] && echo "$MV" > "$OCP/voltage_mv" 2>/tmp/ocp.err
+				printf '{"ok":%s,"mv":%s,"err":"%s"}' "$([ -n "$OCP" ] && echo true || echo false)" "${MV:-0}" "$(cat /tmp/ocp.err 2>/dev/null)"
+				;;
+			stock)
+				# reset to R4 stock clock: 1500 MHz (voltage at the rail minimum)
+				if [ -n "$OCP" ]; then
+					echo 1500 > "$OCP/freq_mhz"   2>/dev/null
+					echo 900  > "$OCP/voltage_mv" 2>/dev/null
+					echo 1500 > /opt/bench/target_mhz 2>/dev/null
+				fi
+				printf '{"ok":%s,"mhz":1500}' "$([ -n "$OCP" ] && echo true || echo false)"
+				;;
+			throttle)
+				ON=$(echo "$input" | jsonfilter -e '@.on' 2>/dev/null)
+				if [ "$ON" = "1" ]; then
+					/etc/init.d/octhrottle enable 2>/dev/null; /etc/init.d/octhrottle start 2>/dev/null
+				else
+					/etc/init.d/octhrottle stop 2>/dev/null; /etc/init.d/octhrottle disable 2>/dev/null
+				fi
+				sleep 1
+				RUN=0; pgrep -f throttled.sh >/dev/null 2>&1 && RUN=1
+				printf '{"ok":true,"on":%s}' "$RUN"
+				;;
+			bench_start)
+				SECS=$(echo "$input" | jsonfilter -e '@.secs' 2>/dev/null); [ -z "$SECS" ] && SECS=60
+				CORES=$(echo "$input" | jsonfilter -e '@.cores' 2>/dev/null); [ -z "$CORES" ] && CORES=4
+				mkdir -p "$RES"
+				if [ -f "$CUR" ] && grep -q '"running":true' "$CUR" 2>/dev/null; then
+					printf '{"ok":false,"err":"already running"}'
+				else
+					setsid /opt/bench/soak.sh "$SECS" "$CORES" >/dev/null 2>&1 &
+					printf '{"ok":true,"secs":%s,"cores":%s}' "$SECS" "$CORES"
+				fi
+				;;
+			bench_status)
+				if [ -f "$CUR" ]; then cat "$CUR"; else printf '{"idle":true}'; fi
+				;;
+			bench_history)
+				H="$RES/history.jsonl"
+				if [ -f "$H" ]; then
+					lines=$(tail -100 "$H" | sed ':a;N;$!ba;s/\n/,/g')
+					printf '{"runs":[%s]}' "$lines"
+				else printf '{"runs":[]}'; fi
+				;;
+			results)
+				f=$(ls -t "$RES"/ocsweep_*.csv 2>/dev/null | head -1)
+				if [ -n "$f" ]; then
+					csv=$(sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g' "$f")
+					printf '{"csv":"%s"}' "$csv"
+				else printf '{"csv":""}'; fi
+				;;
+			*) echo '{}' ;;
+		esac
+		;;
+esac

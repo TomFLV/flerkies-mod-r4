@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# ocsafe: set a SAFE default boot CPU operating point via the ocpanel_cpu module.
+# Default 1.9 GHz @ 0.90 V (validated stable). Sets VOLTAGE FIRST, then clock.
+START=99
+OCSAFE_MHZ=1900
+OCSAFE_MV=900
+
+find_ocp() {
+	for d in /sys/devices/platform/ocpanel-cpu /sys/devices/platform/*ocpanel-cpu*; do
+		[ -f "$d/freq_mhz" ] && { echo "$d"; return; }
+	done
+}
+
+start() {
+	OCP="$(find_ocp)"
+	if [ -n "$OCP" ]; then
+		echo "$OCSAFE_MV"  > "$OCP/voltage_mv" 2>/dev/null   # raise voltage first
+		echo "$OCSAFE_MHZ" > "$OCP/freq_mhz"   2>/dev/null   # then clock
+		mkdir -p /opt/bench; echo "$OCSAFE_MHZ" > /opt/bench/target_mhz 2>/dev/null   # throttle ceiling
+		logger -t ocsafe "set ${OCSAFE_MHZ} MHz @ ${OCSAFE_MV} mV via ocpanel_cpu"
+	else
+		# fallback: plain cpufreq userspace if module not present
+		for c in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do
+			[ -w "$c/scaling_governor" ] && echo userspace > "$c/scaling_governor" 2>/dev/null
+			[ -w "$c/scaling_setspeed" ] && echo $((OCSAFE_MHZ*1000)) > "$c/scaling_setspeed" 2>/dev/null
+		done
+		logger -t ocsafe "module absent; set ${OCSAFE_MHZ} MHz via cpufreq"
+	fi
+}
